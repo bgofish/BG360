@@ -424,7 +424,7 @@ class BG360Panel(lf.ui.Panel):
             # Arc per snap
             ui.label("Arc per frame (°)")
             ui.same_line()
-            changed, new_arc = ui.slider_float("##arc", self._arc_per_snap, 0.02, 2.0)
+            changed, new_arc = ui.slider_float("##arc", self._arc_per_snap, 0.1, 6.0)
             if changed:
                 self._arc_per_snap = max(0.02, float(new_arc))
 
