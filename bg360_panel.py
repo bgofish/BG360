@@ -209,20 +209,34 @@ class BG360Panel(lf.ui.Panel):
 
         ui.heading("360° Background")
 
-        # ── Handle deferred browse (must run outside the previous draw call) ──
+        # ── Handle deferred browse ────────────────────────────────────────────
         if self._open_browse:
             self._open_browse = False
-            initial = str(Path(_bg_path).parent) if _bg_path else os.path.expanduser("~")
-            def _browse(initial=initial):
+            _initial = str(Path(_bg_path).parent) if _bg_path else os.path.expanduser("~")
+            _self = self
+            def _browse():
                 try:
-                    path = lf.ui.open_image_dialog(initial)
-                    if path:
-                        self._pending_path = path
+                    import tkinter as tk
+                    from tkinter import filedialog
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.wm_attributes("-topmost", 1)
+                    p = filedialog.askopenfilename(
+                        initialdir=_initial,
+                        filetypes=[
+                            ("Images", "*.jpg *.jpeg *.png *.hdr *.exr"),
+                            ("All files", "*.*")
+                        ]
+                    )
+                    root.destroy()
+                    if p:
+                        _self._pending_path = p
                         _request_redraw()
                 except Exception as e:
-                    self._status = f"Browse error: {e}"
+                    _self._status = f"Browse error: {e}"
                     _request_redraw()
             threading.Thread(target=_browse, daemon=True).start()
+
 
         # ── Apply loaded image ────────────────────────────────────────────────
         if self._pending_path is not None:
