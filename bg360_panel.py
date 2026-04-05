@@ -33,7 +33,7 @@ _RESOLUTIONS = [
 
 _bg_tensor = None   # [H, W, 3] CUDA float32 equirectangular image
 _bg_path   = ""
-_enabled   = True
+_enabled   = False
 
 
 def _request_redraw():
@@ -53,7 +53,6 @@ def _load_equirect(path: str) -> str:
         from PIL import Image
         import numpy as np
         img = Image.open(path).convert("RGB")
-        img = img.rotate(180)
         arr = np.array(img, dtype=np.float32) / 255.0
         _bg_tensor = lf.Tensor.from_numpy(arr).cuda()
         _bg_path   = path
@@ -118,7 +117,8 @@ def _build_rot_tensor(eye, target, up=(0,1,0)):
 
 
 def composite_render(width, height, fov_x, eye, target,
-                     up=(0.0, 1.0, 0.0), threshold=0.02):
+                     up=(0.0, 1.0, 0.0), threshold=0.02,
+                     flip_v=False, flip_h=False):
     """Returns [H,W,3] CUDA tensor or None."""
     global _bg_tensor
     if _bg_tensor is None:
@@ -137,7 +137,15 @@ def composite_render(width, height, fov_x, eye, target,
         rw    = r_white.cpu().numpy()
         is_bg = np.abs(rw - rb).sum(axis=-1) > threshold
         rot_t = _build_rot_tensor(eye, target, up)
-        bg_np = _sample_equirect(_bg_tensor, rot_t, fov_x, width, height).cpu().numpy()
+        # Apply flips to equirect before sampling
+        eq = _bg_tensor
+        eq_np = eq.cpu().numpy()
+        if flip_v:
+            eq_np = eq_np[::-1, :, :].copy()
+        if flip_h:
+            eq_np = eq_np[:, ::-1, :].copy()
+        eq_flipped = lf.Tensor.from_numpy(eq_np).cuda()
+        bg_np = _sample_equirect(eq_flipped, rot_t, fov_x, width, height).cpu().numpy()
         result = np.where(is_bg[:,:,np.newaxis], bg_np, rb)
         return lf.Tensor.from_numpy(np.clip(result, 0, 1).astype(np.float32)).cuda()
     except Exception as e:
@@ -208,12 +216,16 @@ class BG360Panel(lf.ui.Panel):
         self._status          = ""
         self._pending_path    = None
         self._pending_lfs_path = None
-        self._threshold       = 2
+        self._threshold       = 0.02
         self._preview_tex     = None
         self._preview_w       = 512
         self._preview_h       = 512
         # Resolution
         self._res_idx         = 0    # index into _RESOLUTIONS
+        # Image orientation & path direction
+        self._flip_v          = False   # flip equirect vertically
+        self._flip_h          = False   # flip equirect horizontally
+        self._reverse_path    = False   # reverse camera path direction
         # Path type: "lfs" or "circular"
         self._path_type       = "lfs"
         # LFS path
@@ -317,6 +329,16 @@ class BG360Panel(lf.ui.Panel):
         if changed:
             self._threshold = float(new_t)
 
+        # Image orientation
+        ui.label("Image orientation")
+        changed, v = ui.checkbox("Flip vertical##fv", self._flip_v)
+        if changed:
+            self._flip_v = v
+        ui.same_line()
+        changed, v = ui.checkbox("Flip horizontal##fh", self._flip_h)
+        if changed:
+            self._flip_h = v
+
         ui.separator()
 
         # ── Resolution ────────────────────────────────────────────────────────
@@ -413,6 +435,13 @@ class BG360Panel(lf.ui.Panel):
 
         ui.separator()
 
+        # Path direction
+        changed, v = ui.checkbox("Reverse path direction##rev", self._reverse_path)
+        if changed:
+            self._reverse_path = v
+
+        ui.separator()
+
         # FPS
         ui.label("Frame rate (fps)")
         changed, new_fps = ui.input_int("##fps", self._fps, 1, 10)
@@ -469,7 +498,8 @@ class BG360Panel(lf.ui.Panel):
             pos, target, fov_x = self._get_camera()
 
             result = composite_render(W, H, fov_x, pos, target,
-                                      threshold=self._threshold)
+                                      threshold=self._threshold,
+                                      flip_v=self._flip_v, flip_h=self._flip_h)
             if result is None:
                 self._status = "Render failed — check log."
                 return
@@ -547,12 +577,15 @@ class BG360Panel(lf.ui.Panel):
         self._video_status   = ""
         self._video_progress = "Starting…"
 
-        fps        = self._fps
-        threshold  = self._threshold
-        encoder    = self._encoder_idx
-        path_type  = self._path_type
+        fps          = self._fps
+        threshold    = self._threshold
+        encoder      = self._encoder_idx
+        path_type    = self._path_type
         arc_per_snap = self._arc_per_snap
-        circ_loop  = self._circ_loop
+        circ_loop    = self._circ_loop
+        flip_v       = self._flip_v
+        flip_h       = self._flip_h
+        reverse_path = self._reverse_path
         out_dir    = Path(_bg_path).parent if _bg_path else Path.home()
         ext        = "mkv" if encoder == 0 else "mp4"
         out_video  = str(out_dir / f"bg360_video_{width}x{height}.{ext}")
@@ -569,14 +602,17 @@ class BG360Panel(lf.ui.Panel):
                         _request_redraw()
                         return
 
+                    # Reverse direction if requested
+                    snap_i = (total_frames - 1 - i) if reverse_path else i
+
                     if path_type == "lfs":
                         secs_per_frame = 1.0 / fps
                         pos, target_pt, up_vec, fov = player.get_camera_at_snap(
-                            i, secs_per_frame, loop=False
+                            snap_i, secs_per_frame, loop=False
                         )
                     else:  # circular
                         pos, target_pt, up_vec, fov = player.get_camera_at_snap(
-                            i, arc_per_snap, loop=circ_loop
+                            snap_i, arc_per_snap, loop=circ_loop
                         )
 
                     # fov from LFSPathPlayer is in degrees already
@@ -584,7 +620,8 @@ class BG360Panel(lf.ui.Panel):
                     result = composite_render(
                         width, height, float(fov),
                         pos, target_pt, up=up_vec,
-                        threshold=threshold
+                        threshold=threshold,
+                        flip_v=flip_v, flip_h=flip_h
                     )
 
                     if result is None:
