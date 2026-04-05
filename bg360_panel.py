@@ -134,19 +134,27 @@ def composite_render(width: int, height: int,
     Returns [H, W, 3] CUDA tensor or None on failure.
     """
     global _bg_tensor, _enabled
+    lf.log.info(f"360 BG: composite_render called — enabled={_enabled} tensor={'set' if _bg_tensor is not None else 'None'}")
     if not _enabled or _bg_tensor is None:
+        lf.log.warning(f"360 BG: guard exit — enabled={_enabled} tensor={'set' if _bg_tensor is not None else 'None'}")
         return None
 
     try:
         bg_black = lf.Tensor.zeros((3,), device='cuda', dtype='float32')
         bg_white = lf.Tensor.ones( (3,), device='cuda', dtype='float32')
 
+        lf.log.info("360 BG: calling render_at black...")
         r_black = lf.render_at(eye, target, width, height, fov_x,
                                up=up, bg_color=bg_black)
+        lf.log.info(f"360 BG: r_black={'ok' if r_black is not None else 'None'}")
+
+        lf.log.info("360 BG: calling render_at white...")
         r_white = lf.render_at(eye, target, width, height, fov_x,
                                up=up, bg_color=bg_white)
+        lf.log.info(f"360 BG: r_white={'ok' if r_white is not None else 'None'}")
 
         if r_black is None or r_white is None:
+            lf.log.error("360 BG: render_at returned None")
             return None
 
         import numpy as np
