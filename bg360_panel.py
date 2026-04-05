@@ -157,9 +157,13 @@ def composite_render(width: int, height: int,
             lf.log.error("360 BG: render_at returned None")
             return None
 
+        lf.log.info(f"360 BG: r_black shape={r_black.shape} dtype={r_black.dtype}")
+        lf.log.info(f"360 BG: r_white shape={r_white.shape} dtype={r_white.dtype}")
         import numpy as np
         rb = r_black.cpu().numpy()
+        lf.log.info(f"360 BG: rb numpy shape={rb.shape} dtype={rb.dtype}")
         rw = r_white.cpu().numpy()
+        lf.log.info(f"360 BG: rw numpy shape={rw.shape} dtype={rw.dtype}")
         diff = np.abs(rw - rb).sum(axis=-1)
         is_bg = diff > threshold
 
