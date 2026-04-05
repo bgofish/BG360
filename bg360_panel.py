@@ -165,7 +165,9 @@ def composite_render(width: int, height: int,
         rw = r_white.cpu().numpy()
         lf.log.info(f"360 BG: rw numpy shape={rw.shape} dtype={rw.dtype}")
         diff = np.abs(rw - rb).sum(axis=-1)
+        lf.log.info("360 BG: diff ok")
         is_bg = diff > threshold
+        lf.log.info(f"360 BG: is_bg ok — bg pixels: {is_bg.sum()}")
 
         fwd = np.array(target) - np.array(eye)
         fwd /= np.linalg.norm(fwd)
@@ -178,14 +180,22 @@ def composite_render(width: int, height: int,
         true_up = np.cross(right, fwd)
         true_up /= np.linalg.norm(true_up)
         R = np.stack([right, true_up, fwd], axis=1).astype(np.float32)
+        lf.log.info("360 BG: rotation matrix ok")
         rot_t = lf.Tensor.from_numpy(R).cuda()
+        lf.log.info("360 BG: rot_t on cuda ok")
 
         bg_proj = _sample_equirect(_bg_tensor, rot_t, fov_x, width, height)
+        lf.log.info(f"360 BG: bg_proj ok shape={bg_proj.shape}")
         bg_np   = bg_proj.cpu().numpy()
+        lf.log.info("360 BG: bg_np ok")
 
         result = np.where(is_bg[:, :, np.newaxis], bg_np, rb)
+        lf.log.info("360 BG: composite where ok")
         result = np.clip(result, 0.0, 1.0).astype(np.float32)
-        return lf.Tensor.from_numpy(result).cuda()
+        lf.log.info("360 BG: clip ok")
+        out_t = lf.Tensor.from_numpy(result).cuda()
+        lf.log.info("360 BG: output tensor on cuda ok — returning")
+        return out_t
 
     except Exception as e:
         lf.log.error(f"360 BG: composite error – {e}")
