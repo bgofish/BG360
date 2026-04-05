@@ -216,26 +216,29 @@ class BG360Panel(lf.ui.Panel):
             _self = self
             def _browse():
                 try:
-                    import tkinter as tk
-                    from tkinter import filedialog
-                    root = tk.Tk()
-                    root.withdraw()
-                    root.wm_attributes("-topmost", 1)
-                    p = filedialog.askopenfilename(
-                        initialdir=_initial,
-                        filetypes=[
-                            ("Images", "*.jpg *.jpeg *.png *.hdr *.exr"),
-                            ("All files", "*.*")
-                        ]
+                    import subprocess
+                    ps = (
+                        "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null;"
+                        "$f = New-Object System.Windows.Forms.OpenFileDialog;"
+                        f"$f.InitialDirectory = '{_initial}';"
+                        "$f.Filter = 'Images|*.jpg;*.jpeg;*.png;*.hdr;*.exr|All Files|*.*';"
+                        "$f.ShowDialog() | Out-Null;"
+                        "Write-Output $f.FileName"
                     )
-                    root.destroy()
-                    if p:
+                    result = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", ps],
+                        capture_output=True, text=True, timeout=120
+                    )
+                    p = result.stdout.strip()
+                    if p and Path(p).is_file():
                         _self._pending_path = p
                         _request_redraw()
                 except Exception as e:
                     _self._status = f"Browse error: {e}"
                     _request_redraw()
             threading.Thread(target=_browse, daemon=True).start()
+
+
 
 
         # ── Apply loaded image ────────────────────────────────────────────────
