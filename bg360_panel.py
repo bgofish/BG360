@@ -31,8 +31,8 @@ _render_error    = None   # str error message
 _render_pending  = False  # True while waiting for on_frame to execute
 
 
-def _on_frame_render():
-    """Called from main thread via lf.on_frame() — safe to call render_at."""
+def _on_frame_render(ctx=None):
+    """Called from main thread via draw handler — safe to call render_at."""
     global _render_request, _render_result, _render_error, _render_pending
     if _render_request is None:
         return
@@ -82,7 +82,10 @@ def _on_frame_render():
         lf.log.error(f"360 BG on_frame render: {traceback.format_exc()}")
 
     _render_pending = False
-    lf.stop_animation()   # stop the per-frame callback
+    try:
+        lf.remove_draw_handler("bg360_render")
+    except Exception:
+        pass
     lf.ui.request_redraw()
 
 
@@ -285,8 +288,12 @@ class BG360Panel(lf.ui.Panel):
             'up': (0.0, 1.0, 0.0),
             'threshold': self._threshold,
         }
-        # Kick off per-frame callback on main thread
-        lf.on_frame(_on_frame_render)
+        # Kick off via draw handler on main thread
+        try:
+            lf.remove_draw_handler("bg360_render")
+        except Exception:
+            pass
+        lf.add_draw_handler("bg360_render", _on_frame_render, "POST_VIEW")
 
     def _save_array(self, arr):
         try:
