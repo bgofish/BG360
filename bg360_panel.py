@@ -28,6 +28,7 @@ def _load_equirect(path: str):
     """Load equirectangular image to a CUDA float32 tensor [H, W, 3]."""
     global _bg_tensor, _bg_path
     try:
+        # Use PIL to load — available in most Python envs
         from PIL import Image
         import numpy as np
         img = Image.open(path).convert("RGB")
@@ -50,38 +51,45 @@ def _sample_equirect(eq: object, rot_mat, fov_x_deg: float,
     rot_mat: [3, 3] CUDA tensor  (camera rotation, cols = right/up/forward)
     Returns: [height, width, 3] CUDA tensor
     """
-    import numpy as np
+    import math
 
     H_eq, W_eq = eq.shape[0], eq.shape[1]
     fov_x = math.radians(fov_x_deg)
     fov_y = 2.0 * math.atan(math.tan(fov_x / 2.0) * height / width)
 
     # Build grid of normalised image-plane directions
+    # xs, ys in [-1, 1]
     xs = lf.Tensor.linspace(-1.0, 1.0, width,  device='cuda', dtype='float32')
     ys = lf.Tensor.linspace( 1.0,-1.0, height, device='cuda', dtype='float32')
 
+    # tan half-fov scales
     tx = math.tan(fov_x / 2.0)
     ty = math.tan(fov_y / 2.0)
 
+    # Camera-space ray directions [H, W, 3]  (x right, y up, z forward)
+    # We'll build as numpy then convert — easier without broadcast API
+    import numpy as np
     xs_np = xs.numpy()          # [W]
     ys_np = ys.numpy()          # [H]
     xg, yg = np.meshgrid(xs_np, ys_np)   # [H, W]
+    zg     = np.ones_like(xg)
     dx     = xg * tx
     dy     = yg * ty
-    dz     = np.ones_like(xg)
+    dz     = zg
     # Normalise
     norm   = np.sqrt(dx**2 + dy**2 + dz**2)
     dx /= norm;  dy /= norm;  dz /= norm
 
     # Rotate by camera rotation matrix (world directions)
     R = rot_mat.cpu().numpy()   # [3, 3]
+    # ray_world = R @ [dx, dy, dz]  per pixel
     rx = R[0,0]*dx + R[0,1]*dy + R[0,2]*dz
     ry = R[1,0]*dx + R[1,1]*dy + R[1,2]*dz
     rz = R[2,0]*dx + R[2,1]*dy + R[2,2]*dz
 
     # Convert to spherical (longitude, latitude)
-    lon = np.arctan2(rx, rz)                      # [-pi, pi]
-    lat = np.arcsin(np.clip(ry, -1.0, 1.0))       # [-pi/2, pi/2]
+    lon = np.arctan2(rx, rz)           # [-pi, pi]
+    lat = np.arcsin(np.clip(ry, -1.0, 1.0))  # [-pi/2, pi/2]
 
     # Map to equirectangular UV
     u = (lon / (2.0 * math.pi) + 0.5) * (W_eq - 1)
@@ -132,8 +140,6 @@ def composite_render(width: int, height: int,
         return None
 
     try:
-        import numpy as np
-
         bg_black = lf.Tensor.zeros((3,), device='cuda', dtype='float32')
         bg_white = lf.Tensor.ones( (3,), device='cuda', dtype='float32')
 
@@ -146,12 +152,14 @@ def composite_render(width: int, height: int,
             return None
 
         # Build background mask: pixels where white and black renders differ
+        import numpy as np
         rb = r_black.cpu().numpy()   # [H, W, 3]
         rw = r_white.cpu().numpy()
         diff = np.abs(rw - rb).sum(axis=-1)  # [H, W]
         is_bg = diff > threshold             # True = background pixel
 
-        # Compute rotation matrix from eye→target
+        # Get camera rotation from render geometry
+        # Compute rotation from eye→target
         fwd = np.array(target) - np.array(eye)
         fwd /= np.linalg.norm(fwd)
         up_v = np.array(up)
@@ -178,17 +186,6 @@ def composite_render(width: int, height: int,
     except Exception as e:
         lf.log.error(f"360 BG: composite error – {e}")
         return None
-
-
-def _view_pos_and_target(view):
-    """Extract plain-float (pos tuple, target tuple) from a view object."""
-    import numpy as np
-    rot = view.rotation.cpu().numpy()          # [3, 3]
-    fwd = (float(rot[0, 2]), float(rot[1, 2]), float(rot[2, 2]))
-    raw = view.position
-    pos = (float(raw[0]), float(raw[1]), float(raw[2]))
-    target = (pos[0] + fwd[0], pos[1] + fwd[1], pos[2] + fwd[2])
-    return pos, target
 
 
 # ── Panel ─────────────────────────────────────────────────────────────────────
@@ -272,7 +269,7 @@ class BG360Panel(lf.ui.Panel):
         # Render & preview
         if _bg_tensor is not None and lf.has_scene():
             if ui.button_styled("Render Preview", "primary"):
-                self._do_preview()
+                self._do_preview(ui)
 
             if self._preview_tex is not None:
                 avail = ui.get_content_region_avail()
@@ -287,11 +284,16 @@ class BG360Panel(lf.ui.Panel):
             if ui.button("Save Composite Render"):
                 self._do_save()
 
-    def _do_preview(self):
+    def _do_preview(self, ui):
         """Render a small composite and show in panel."""
         try:
-            view = lf.get_current_view()
-            pos, target = _view_pos_and_target(view)
+            view    = lf.get_current_view()
+            rot     = view.rotation.cpu().numpy()
+            import numpy as np
+            fwd     = (float(rot[0,2]), float(rot[1,2]), float(rot[2,2]))
+            raw_pos = view.position
+            pos     = (float(raw_pos[0]), float(raw_pos[1]), float(raw_pos[2]))
+            target  = (pos[0]+fwd[0], pos[1]+fwd[1], pos[2]+fwd[2])
 
             W, H = 512, 512
             result = composite_render(
@@ -325,8 +327,12 @@ class BG360Panel(lf.ui.Panel):
                 self._status = "No image loaded."
                 return
 
-            view = lf.get_current_view()
-            pos, target = _view_pos_and_target(view)
+            view    = lf.get_current_view()
+            rot     = view.rotation.cpu().numpy()
+            fwd     = (float(rot[0,2]), float(rot[1,2]), float(rot[2,2]))
+            raw_pos = view.position
+            pos     = (float(raw_pos[0]), float(raw_pos[1]), float(raw_pos[2]))
+            target  = (pos[0]+fwd[0], pos[1]+fwd[1], pos[2]+fwd[2])
 
             result = composite_render(
                 view.width, view.height, view.fov_x, pos, target,
@@ -336,9 +342,9 @@ class BG360Panel(lf.ui.Panel):
                 self._status = "Render failed."
                 return
 
-            arr = (result.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-            img = Image.fromarray(arr)
-            out = str(Path(_bg_path).parent / "composite_render.png")
+            arr  = (result.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            img  = Image.fromarray(arr)
+            out  = str(Path(_bg_path).parent / "composite_render.png")
             img.save(out)
             self._status = f"Saved: {out}"
             lf.log.info(f"360 BG: saved composite to {out}")
