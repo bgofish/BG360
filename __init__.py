@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import lichtfeld as lf
-from .panels.bg360_panel import BG360Panel
+from .bg360_panel import BG360Panel
 
 _classes = [BG360Panel]
 
