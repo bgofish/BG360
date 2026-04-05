@@ -33,7 +33,7 @@ _RESOLUTIONS = [
 
 _bg_tensor = None   # [H, W, 3] CUDA float32 equirectangular image
 _bg_path   = ""
-_enabled   = False
+_enabled   = True
 
 
 def _request_redraw():
