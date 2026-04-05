@@ -135,8 +135,8 @@ def composite_render(width: int, height: int,
     Render splat with 360 background composite.
     Returns [H, W, 3] CUDA tensor or None on failure.
     """
-    global _bg_tensor, _enabled
-    if not _enabled or _bg_tensor is None:
+    global _bg_tensor
+    if _bg_tensor is None:
         return None
 
     try:
@@ -286,6 +286,10 @@ class BG360Panel(lf.ui.Panel):
 
     def _do_preview(self, ui):
         """Render a small composite and show in panel."""
+        global _bg_tensor
+        if _bg_tensor is None:
+            self._status = "Load an image first."
+            return
         try:
             view   = lf.get_current_view()
             rot    = view.rotation.cpu().numpy()
