@@ -1,6 +1,6 @@
 [project]
 name = "BG360"
-version = "0.1.3"
+version = "0.1.4"
 description = "Load a 360 equirectangular image as a composited background behind Gaussian splats"
 authors = [{name = "Brian Davis (bb6)"}]
 dependencies = ["Pillow"]
