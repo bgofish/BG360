@@ -33,7 +33,7 @@ _RESOLUTIONS = [
 
 _bg_tensor = None   # [H, W, 3] CUDA float32 equirectangular image
 _bg_path   = ""
-_enabled   = False
+_enabled   = True
 
 
 def _request_redraw():
@@ -84,7 +84,7 @@ def _sample_equirect(eq, rot_mat, fov_x_deg: float, width: int, height: int):
     ry = R[1,0]*dx + R[1,1]*dy + R[1,2]*dz
     rz = R[2,0]*dx + R[2,1]*dy + R[2,2]*dz
 
-    lon = -np.arctan2(rx, rz)   # negate to match Lichtfeld coordinate handedness
+    lon = np.arctan2(rx, rz)
     lat = np.arcsin(np.clip(ry, -1.0, 1.0))
     u   = (lon / (2.0*math.pi) + 0.5) * (W_eq - 1)
     v   = (0.5 - lat / math.pi)        * (H_eq - 1)
@@ -107,11 +107,12 @@ def _build_rot_tensor(eye, target, up=(0,1,0)):
     fwd = np.array(target, dtype=np.float64) - np.array(eye, dtype=np.float64)
     fwd /= np.linalg.norm(fwd)
     up_v = np.array(up, dtype=np.float64)
-    right = np.cross(fwd, up_v)
+    # Use right-handed basis: right = up × fwd, then recompute true_up
+    right = np.cross(up_v, fwd)
     if np.linalg.norm(right) < 1e-6:
-        up_v = np.array([0.0, 0.0, 1.0]); right = np.cross(fwd, up_v)
+        up_v = np.array([0.0, 0.0, 1.0]); right = np.cross(up_v, fwd)
     right   /= np.linalg.norm(right)
-    true_up  = np.cross(right, fwd); true_up /= np.linalg.norm(true_up)
+    true_up  = np.cross(fwd, right); true_up /= np.linalg.norm(true_up)
     R = np.stack([right, true_up, fwd], axis=1).astype(np.float32)
     return lf.Tensor.from_numpy(R).cuda()
 
@@ -216,7 +217,7 @@ class BG360Panel(lf.ui.Panel):
         self._status          = ""
         self._pending_path    = None
         self._pending_lfs_path = None
-        self._threshold       = 0.1
+        self._threshold       = 2
         self._preview_tex     = None
         self._preview_w       = 512
         self._preview_h       = 512
@@ -224,7 +225,7 @@ class BG360Panel(lf.ui.Panel):
         self._res_idx         = 0    # index into _RESOLUTIONS
         # Image orientation & path direction
         self._flip_v          = False   # flip equirect vertically
-        self._flip_h          = False   # flip equirect horizontally
+        self._flip_h          = True   # flip equirect horizontally
         self._reverse_path    = False   # reverse camera path direction
         # Path type: "lfs" or "circular"
         self._path_type       = "lfs"
