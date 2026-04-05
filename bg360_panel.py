@@ -193,6 +193,7 @@ class BG360Panel(lf.ui.Panel):
     def __init__(self):
         self._status          = ""
         self._pending_path    = None
+        self._open_browse     = False   # deferred flag — open dialog next frame
         self._threshold       = 0.02
         self._preview_tensor  = None
         self._preview_tex     = None
@@ -208,6 +209,22 @@ class BG360Panel(lf.ui.Panel):
 
         ui.heading("360° Background")
 
+        # ── Handle deferred browse (must run outside the previous draw call) ──
+        if self._open_browse:
+            self._open_browse = False
+            initial = str(Path(_bg_path).parent) if _bg_path else os.path.expanduser("~")
+            def _browse(initial=initial):
+                try:
+                    path = lf.ui.open_image_dialog(initial)
+                    if path:
+                        self._pending_path = path
+                        _request_redraw()
+                except Exception as e:
+                    self._status = f"Browse error: {e}"
+                    _request_redraw()
+            threading.Thread(target=_browse, daemon=True).start()
+
+        # ── Apply loaded image ────────────────────────────────────────────────
         if self._pending_path is not None:
             err = _load_equirect(self._pending_path)
             if err:
@@ -234,16 +251,10 @@ class BG360Panel(lf.ui.Panel):
         else:
             ui.text_disabled("No image loaded")
 
+        # Set flag only — actual dialog opens next frame
         if ui.button("Browse Image"):
-            initial = str(Path(_bg_path).parent) if _bg_path else os.path.expanduser("~")
-            try:
-                path = lf.ui.open_image_dialog(initial)
-                if path:
-                    self._pending_path = path
-                    _request_redraw()
-            except Exception as e:
-                self._status = f"Browse error: {e}"
-                _request_redraw()
+            self._open_browse = True
+            _request_redraw()
 
         ui.separator()
 
