@@ -128,15 +128,19 @@ def composite_render(width, height, fov_x, eye, target,
         return None
     try:
         import numpy as np
-        fov_x_rad = math.radians(fov_x)   # render_at wants radians
         bg_black = lf.Tensor.zeros((3,), device='cuda', dtype='float32')
         bg_white = lf.Tensor.ones( (3,), device='cuda', dtype='float32')
-        r_black  = lf.render_at(eye, target, width, height, fov_x_rad,
+        r_black  = lf.render_at(eye, target, width, height, fov_x,
                                 up=up, bg_color=bg_black)
-        r_white  = lf.render_at(eye, target, width, height, fov_x_rad,
+        r_white  = lf.render_at(eye, target, width, height, fov_x,
                                 up=up, bg_color=bg_white)
         if r_black is None or r_white is None:
             return None
+        # Re-read fov_x from the view AFTER render_at so we get the current lens value
+        try:
+            fov_x = float(lf.get_current_view().fov_x)
+        except Exception:
+            pass  # keep passed-in value if this fails
         rb    = r_black.cpu().numpy()
         rw    = r_white.cpu().numpy()
         is_bg = np.abs(rw - rb).sum(axis=-1) > threshold
@@ -228,10 +232,10 @@ class BG360Panel(lf.ui.Panel):
         self._res_idx         = 0    # index into _RESOLUTIONS
         # Image orientation & path direction
         self._flip_v          = False   # flip equirect vertically
-        self._flip_h          = True   # flip equirect horizontally
+        self._flip_h          = False   # flip equirect horizontally
         self._reverse_path    = False   # reverse camera path direction
         # Path type: "lfs" or "circular"
-        self._path_type       = "circular"
+        self._path_type       = "lfs"
         # LFS path
         self._lfs_path        = ""
         self._lfs_player      = None
