@@ -21,7 +21,7 @@ import lichtfeld as lf
 _bg_tensor:    object = None   # [H, W, 3] CUDA float32 equirectangular image
 _bg_path:      str    = ""
 _preview_tex:  object = None   # DynamicTexture for panel preview
-_enabled:      bool   = False
+_enabled:      bool   = True
 
 
 def _request_redraw():
