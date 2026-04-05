@@ -33,7 +33,7 @@ _RESOLUTIONS = [
 
 _bg_tensor = None   # [H, W, 3] CUDA float32 equirectangular image
 _bg_path   = ""
-_enabled   = True
+_enabled   = False
 
 
 def _request_redraw():
@@ -84,7 +84,7 @@ def _sample_equirect(eq, rot_mat, fov_x_deg: float, width: int, height: int):
     ry = R[1,0]*dx + R[1,1]*dy + R[1,2]*dz
     rz = R[2,0]*dx + R[2,1]*dy + R[2,2]*dz
 
-    lon = np.arctan2(rx, rz)
+    lon = -np.arctan2(rx, rz)   # negate to match Lichtfeld coordinate handedness
     lat = np.arcsin(np.clip(ry, -1.0, 1.0))
     u   = (lon / (2.0*math.pi) + 0.5) * (W_eq - 1)
     v   = (0.5 - lat / math.pi)        * (H_eq - 1)
@@ -107,12 +107,11 @@ def _build_rot_tensor(eye, target, up=(0,1,0)):
     fwd = np.array(target, dtype=np.float64) - np.array(eye, dtype=np.float64)
     fwd /= np.linalg.norm(fwd)
     up_v = np.array(up, dtype=np.float64)
-    # Use right-handed basis: right = up × fwd, then recompute true_up
-    right = np.cross(up_v, fwd)
+    right = np.cross(fwd, up_v)
     if np.linalg.norm(right) < 1e-6:
-        up_v = np.array([0.0, 0.0, 1.0]); right = np.cross(up_v, fwd)
+        up_v = np.array([0.0, 0.0, 1.0]); right = np.cross(fwd, up_v)
     right   /= np.linalg.norm(right)
-    true_up  = np.cross(fwd, right); true_up /= np.linalg.norm(true_up)
+    true_up  = np.cross(right, fwd); true_up /= np.linalg.norm(true_up)
     R = np.stack([right, true_up, fwd], axis=1).astype(np.float32)
     return lf.Tensor.from_numpy(R).cuda()
 
@@ -120,17 +119,21 @@ def _build_rot_tensor(eye, target, up=(0,1,0)):
 def composite_render(width, height, fov_x, eye, target,
                      up=(0.0, 1.0, 0.0), threshold=0.02,
                      flip_v=False, flip_h=False):
-    """Returns [H,W,3] CUDA tensor or None."""
+    """Returns [H,W,3] CUDA tensor or None.
+    fov_x is in degrees (as returned by view.fov_x).
+    lf.render_at expects radians; _sample_equirect expects degrees.
+    """
     global _bg_tensor
     if _bg_tensor is None:
         return None
     try:
         import numpy as np
+        fov_x_rad = math.radians(fov_x)   # render_at wants radians
         bg_black = lf.Tensor.zeros((3,), device='cuda', dtype='float32')
         bg_white = lf.Tensor.ones( (3,), device='cuda', dtype='float32')
-        r_black  = lf.render_at(eye, target, width, height, fov_x,
+        r_black  = lf.render_at(eye, target, width, height, fov_x_rad,
                                 up=up, bg_color=bg_black)
-        r_white  = lf.render_at(eye, target, width, height, fov_x,
+        r_white  = lf.render_at(eye, target, width, height, fov_x_rad,
                                 up=up, bg_color=bg_white)
         if r_black is None or r_white is None:
             return None
@@ -217,7 +220,7 @@ class BG360Panel(lf.ui.Panel):
         self._status          = ""
         self._pending_path    = None
         self._pending_lfs_path = None
-        self._threshold       = 2
+        self._threshold       = 0.1
         self._preview_tex     = None
         self._preview_w       = 512
         self._preview_h       = 512
@@ -228,7 +231,7 @@ class BG360Panel(lf.ui.Panel):
         self._flip_h          = True   # flip equirect horizontally
         self._reverse_path    = False   # reverse camera path direction
         # Path type: "lfs" or "circular"
-        self._path_type       = "lfs"
+        self._path_type       = "circular"
         # LFS path
         self._lfs_path        = ""
         self._lfs_player      = None
