@@ -137,10 +137,12 @@ def composite_render(width, height, fov_x, eye, target,
         if r_black is None or r_white is None:
             return None
         # Re-read fov_x from the view AFTER render_at so we get the current lens value
+        fov_x_before = fov_x
         try:
             fov_x = float(lf.get_current_view().fov_x)
         except Exception:
             pass  # keep passed-in value if this fails
+        lf.log.info(f"360 BG: fov_x before={fov_x_before:.4f} after={fov_x:.4f}")
         rb    = r_black.cpu().numpy()
         rw    = r_white.cpu().numpy()
         is_bg = np.abs(rw - rb).sum(axis=-1) > threshold
