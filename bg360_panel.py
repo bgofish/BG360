@@ -655,7 +655,7 @@ class BG360Panel(lf.ui.Panel):
 
                 try:
                     import shutil
-                    shutil.rmtree(frames_dir)
+                    ##shutil.rmtree(frames_dir)
                 except Exception:
                     pass
 
