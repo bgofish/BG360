@@ -308,11 +308,7 @@ class BG360Panel(lf.ui.Panel):
             if ui.button_styled("Render Preview", "primary"):
                 self._do_preview(ui)
 
-            if self._preview_tex is not None:
-                avail = ui.get_content_region_avail()
-                w = int(avail[0])
-                h = int(w * self._height / max(1, self._width))
-                ui.image_texture(self._preview_tex, (w, h))
+
 
         ui.separator()
 
@@ -321,11 +317,13 @@ class BG360Panel(lf.ui.Panel):
                 self._do_save()
 
     def _do_preview(self, ui):
-        """Render a small composite and show in panel."""
+        """Render a small composite and save as preview PNG."""
         try:
+            from PIL import Image
+            import numpy as np
+
             view    = lf.get_current_view()
             rot     = view.rotation.cpu().numpy()
-            import numpy as np
             fwd     = (float(rot[0,2]), float(rot[1,2]), float(rot[2,2]))
             raw_pos = view.position
             pos     = (float(raw_pos[0]), float(raw_pos[1]), float(raw_pos[2]))
@@ -339,15 +337,13 @@ class BG360Panel(lf.ui.Panel):
                 _request_redraw()
                 return
 
-            self._width  = W
-            self._height = H
-
-            if self._preview_tex is None:
-                self._preview_tex = lf.ui.DynamicTexture(result)
-            else:
-                self._preview_tex.update(result)
-
-            self._status = "Preview rendered."
+            # Save preview PNG next to the bg image
+            arr = (result.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            img = Image.fromarray(arr)
+            preview_path = str(Path(_bg_path).parent / "bg360_preview.png")
+            img.save(preview_path)
+            self._status = f"Preview saved: {preview_path}"
+            lf.log.info(f"360 BG: preview saved to {preview_path}")
             _request_redraw()
 
         except Exception as e:
