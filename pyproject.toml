@@ -1,6 +1,6 @@
 [project]
 name = "BG360"
-version = "0.1.0"
+version = "0.1.1"
 description = "Load a 360 equirectangular image as a composited background behind Gaussian splats"
 authors = [{name = "bgofish"}]
 dependencies = ["Pillow"]
