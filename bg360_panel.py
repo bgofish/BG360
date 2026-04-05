@@ -84,7 +84,7 @@ def _sample_equirect(eq, rot_mat, fov_x_deg: float, width: int, height: int):
     ry = R[1,0]*dx + R[1,1]*dy + R[1,2]*dz
     rz = R[2,0]*dx + R[2,1]*dy + R[2,2]*dz
 
-    lon = np.arctan2(rx, rz)
+    lon = -np.arctan2(rx, rz)   # negate to match Lichtfeld coordinate handedness
     lat = np.arcsin(np.clip(ry, -1.0, 1.0))
     u   = (lon / (2.0*math.pi) + 0.5) * (W_eq - 1)
     v   = (0.5 - lat / math.pi)        * (H_eq - 1)
@@ -353,17 +353,8 @@ class BG360Panel(lf.ui.Panel):
         # ── Still render ──────────────────────────────────────────────────────
         if _bg_tensor is not None and lf.has_scene():
             W, H, _ = self._current_res()
-            if ui.button_styled("Render Preview", "primary"):
-                self._do_still(preview=True)
-            ui.same_line()
-            if ui.button(f"Save {W}×{H}##still"):
+            if ui.button_styled(f"Save {W}×{H}##still", "primary"):
                 self._do_still(preview=False)
-
-            if self._preview_tex is not None:
-                avail = ui.get_content_region_avail()
-                pw = int(avail[0])
-                ph = int(pw * self._preview_h / max(1, self._preview_w))
-                ui.image_texture(self._preview_tex, (pw, ph))
 
         ui.separator()
 
