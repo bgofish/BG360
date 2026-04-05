@@ -216,7 +216,7 @@ class BG360Panel(lf.ui.Panel):
         self._status          = ""
         self._pending_path    = None
         self._pending_lfs_path = None
-        self._threshold       = 0.02
+        self._threshold       = 0.1
         self._preview_tex     = None
         self._preview_w       = 512
         self._preview_h       = 512
