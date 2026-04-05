@@ -18,23 +18,20 @@ import lichtfeld as lf
 
 # ── Module-level state ────────────────────────────────────────────────────────
 
-_bg_tensor:    object = None   # [H, W, 3] CUDA float32 equirectangular image
-_bg_path:      str    = ""
-_preview_tex:  object = None   # DynamicTexture for panel preview
-_enabled:      bool   = False
+_bg_tensor   = None   # [H, W, 3] CUDA float32 equirectangular image
+_bg_path     = ""
+_enabled     = False
 
 
-def _load_equirect(path: str):
+def _load_equirect(path: str) -> str:
     """Load equirectangular image to a CUDA float32 tensor [H, W, 3]."""
     global _bg_tensor, _bg_path
     try:
-        # Use PIL to load — available in most Python envs
         from PIL import Image
         import numpy as np
         img = Image.open(path).convert("RGB")
         arr = np.array(img, dtype=np.float32) / 255.0
-        t   = lf.Tensor.from_numpy(arr).cuda()
-        _bg_tensor = t
+        _bg_tensor = lf.Tensor.from_numpy(arr).cuda()
         _bg_path   = path
         lf.log.info(f"360 BG: loaded {path} — {arr.shape[1]}x{arr.shape[0]}")
         return ""
@@ -43,167 +40,129 @@ def _load_equirect(path: str):
         return str(e)
 
 
-def _sample_equirect(eq: object, rot_mat, fov_x_deg: float,
-                     width: int, height: int) -> object:
+def _sample_equirect(eq, R, fov_x_deg: float, width: int, height: int):
     """
     Project equirectangular image to a perspective frustum.
-    eq:      [H_eq, W_eq, 3] CUDA tensor
-    rot_mat: [3, 3] CUDA tensor  (camera rotation, cols = right/up/forward)
-    Returns: [height, width, 3] CUDA tensor
+    eq: [H_eq, W_eq, 3] CUDA tensor
+    R:  [3, 3] numpy array  (cols = right, up, forward)
+    Returns [height, width, 3] float32 numpy array.
     """
-    import math
-
+    import numpy as np
     H_eq, W_eq = eq.shape[0], eq.shape[1]
     fov_x = math.radians(fov_x_deg)
     fov_y = 2.0 * math.atan(math.tan(fov_x / 2.0) * height / width)
+    tx    = math.tan(fov_x / 2.0)
+    ty    = math.tan(fov_y / 2.0)
 
-    # Build grid of normalised image-plane directions
-    # xs, ys in [-1, 1]
-    xs = lf.Tensor.linspace(-1.0, 1.0, width,  device='cuda', dtype='float32')
-    ys = lf.Tensor.linspace( 1.0,-1.0, height, device='cuda', dtype='float32')
+    xs = np.linspace(-1.0, 1.0, width,  dtype=np.float32)
+    ys = np.linspace( 1.0,-1.0, height, dtype=np.float32)
+    xg, yg = np.meshgrid(xs, ys)
 
-    # tan half-fov scales
-    tx = math.tan(fov_x / 2.0)
-    ty = math.tan(fov_y / 2.0)
-
-    # Camera-space ray directions [H, W, 3]  (x right, y up, z forward)
-    # We'll build as numpy then convert — easier without broadcast API
-    import numpy as np
-    xs_np = xs.numpy()          # [W]
-    ys_np = ys.numpy()          # [H]
-    xg, yg = np.meshgrid(xs_np, ys_np)   # [H, W]
-    zg     = np.ones_like(xg)
-    dx     = xg * tx
-    dy     = yg * ty
-    dz     = zg
-    # Normalise
-    norm   = np.sqrt(dx**2 + dy**2 + dz**2)
+    dx = xg * tx
+    dy = yg * ty
+    dz = np.ones_like(dx)
+    norm = np.sqrt(dx**2 + dy**2 + dz**2)
     dx /= norm;  dy /= norm;  dz /= norm
 
-    # Rotate by camera rotation matrix (world directions)
-    R = rot_mat.cpu().numpy()   # [3, 3]
-    # ray_world = R @ [dx, dy, dz]  per pixel
     rx = R[0,0]*dx + R[0,1]*dy + R[0,2]*dz
     ry = R[1,0]*dx + R[1,1]*dy + R[1,2]*dz
     rz = R[2,0]*dx + R[2,1]*dy + R[2,2]*dz
 
-    # Convert to spherical (longitude, latitude)
-    lon = np.arctan2(rx, rz)           # [-pi, pi]
-    lat = np.arcsin(np.clip(ry, -1.0, 1.0))  # [-pi/2, pi/2]
+    lon = np.arctan2(rx, rz)
+    lat = np.arcsin(np.clip(ry, -1.0, 1.0))
 
-    # Map to equirectangular UV
     u = (lon / (2.0 * math.pi) + 0.5) * (W_eq - 1)
     v = (0.5 - lat / math.pi)          * (H_eq - 1)
 
-    # Bilinear sample
     u0 = np.floor(u).astype(np.int32)
     v0 = np.floor(v).astype(np.int32)
-    u1 = u0 + 1
-    v1 = v0 + 1
-    fu = (u - u0).astype(np.float32)
-    fv = (v - v0).astype(np.float32)
-
+    u1 = np.clip(u0 + 1, 0, W_eq - 1)
+    v1 = np.clip(v0 + 1, 0, H_eq - 1)
     u0 = np.clip(u0, 0, W_eq - 1)
-    u1 = np.clip(u1, 0, W_eq - 1)
     v0 = np.clip(v0, 0, H_eq - 1)
-    v1 = np.clip(v1, 0, H_eq - 1)
 
-    eq_np = eq.cpu().numpy()   # [H_eq, W_eq, 3]
+    fu = (u - np.floor(u)).astype(np.float32)[:, :, np.newaxis]
+    fv = (v - np.floor(v)).astype(np.float32)[:, :, np.newaxis]
 
-    c00 = eq_np[v0, u0]   # [H, W, 3]
+    eq_np = eq.cpu().numpy()
+    c00 = eq_np[v0, u0]
     c10 = eq_np[v0, u1]
     c01 = eq_np[v1, u0]
     c11 = eq_np[v1, u1]
 
-    fu = fu[:, :, np.newaxis]
-    fv = fv[:, :, np.newaxis]
-
-    result = (c00 * (1-fu) * (1-fv) +
-              c10 *    fu  * (1-fv) +
-              c01 * (1-fu) *    fv  +
-              c11 *    fu  *    fv)
-
-    return lf.Tensor.from_numpy(result.astype(np.float32)).cuda()
+    return (c00*(1-fu)*(1-fv) + c10*fu*(1-fv) +
+            c01*(1-fu)*fv     + c11*fu*fv).astype(np.float32)
 
 
-def composite_render(width: int, height: int,
-                     fov_x: float,
+def _build_rotation(eye: tuple, target: tuple, up: tuple) -> object:
+    """Build [3,3] rotation matrix from eye/target/up."""
+    import numpy as np
+    fwd = np.array(target, dtype=np.float64) - np.array(eye, dtype=np.float64)
+    fwd /= np.linalg.norm(fwd)
+    up_v = np.array(up, dtype=np.float64)
+    right = np.cross(fwd, up_v)
+    if np.linalg.norm(right) < 1e-6:
+        up_v = np.array([0.0, 0.0, 1.0])
+        right = np.cross(fwd, up_v)
+    right   /= np.linalg.norm(right)
+    true_up  = np.cross(right, fwd)
+    true_up /= np.linalg.norm(true_up)
+    return np.stack([right, true_up, fwd], axis=1).astype(np.float32)
+
+
+def composite_render(width: int, height: int, fov_x: float,
                      eye: tuple, target: tuple,
                      up: tuple = (0.0, 1.0, 0.0),
-                     threshold: float = 0.02) -> object | None:
+                     threshold: float = 0.02):
     """
-    Render splat with 360 background composite.
-    Returns [H, W, 3] CUDA tensor or None on failure.
+    Render splat with 360 background composited.
+    Returns [H, W, 3] float32 numpy array or None.
     """
+    import numpy as np
     global _bg_tensor
     if _bg_tensor is None:
         return None
 
-    try:
-        bg_black = lf.Tensor.zeros((3,), device='cuda', dtype='float32')
-        bg_white = lf.Tensor.ones( (3,), device='cuda', dtype='float32')
+    bg_black = lf.Tensor.zeros((3,), device='cuda', dtype='float32')
+    bg_white = lf.Tensor.ones( (3,), device='cuda', dtype='float32')
 
-        r_black = lf.render_at(eye, target, width, height, fov_x,
-                               up=up, bg_color=bg_black)
-        r_white = lf.render_at(eye, target, width, height, fov_x,
-                               up=up, bg_color=bg_white)
+    r_black = lf.render_at(eye, target, width, height, fov_x,
+                           up=up, bg_color=bg_black)
+    r_white = lf.render_at(eye, target, width, height, fov_x,
+                           up=up, bg_color=bg_white)
 
-        if r_black is None or r_white is None:
-            return None
-
-        # Build background mask: pixels where white and black renders differ
-        import numpy as np
-        rb = r_black.cpu().numpy()   # [H, W, 3]
-        rw = r_white.cpu().numpy()
-        diff = np.abs(rw - rb).sum(axis=-1)  # [H, W]
-        is_bg = diff > threshold             # True = background pixel
-
-        # Get camera rotation from render geometry
-        # Compute rotation from eye→target
-        fwd = np.array(target) - np.array(eye)
-        fwd /= np.linalg.norm(fwd)
-        up_v = np.array(up)
-        right = np.cross(fwd, up_v)
-        if np.linalg.norm(right) < 1e-6:
-            up_v = np.array([0.0, 0.0, 1.0])
-            right = np.cross(fwd, up_v)
-        right /= np.linalg.norm(right)
-        true_up = np.cross(right, fwd)
-        true_up /= np.linalg.norm(true_up)
-        # Rotation matrix: cols = right, true_up, fwd
-        R = np.stack([right, true_up, fwd], axis=1).astype(np.float32)
-        rot_t = lf.Tensor.from_numpy(R).cuda()
-
-        # Project equirectangular to frustum
-        bg_proj = _sample_equirect(_bg_tensor, rot_t, fov_x, width, height)
-        bg_np   = bg_proj.cpu().numpy()
-
-        # Composite
-        result = np.where(is_bg[:, :, np.newaxis], bg_np, rb)
-        result = np.clip(result, 0.0, 1.0).astype(np.float32)
-        return lf.Tensor.from_numpy(result).cuda()
-
-    except Exception as e:
-        lf.log.error(f"360 BG: composite error – {e}")
+    if r_black is None or r_white is None:
+        lf.log.error("360 BG: render_at returned None")
         return None
+
+    rb   = r_black.cpu().numpy()
+    rw   = r_white.cpu().numpy()
+    diff = np.abs(rw - rb).sum(axis=-1)
+    is_bg = diff > threshold
+
+    R      = _build_rotation(eye, target, up)
+    bg_np  = _sample_equirect(_bg_tensor, R, fov_x, width, height)
+    result = np.where(is_bg[:, :, np.newaxis], bg_np, rb)
+    return np.clip(result, 0.0, 1.0).astype(np.float32)
 
 
 # ── Panel ─────────────────────────────────────────────────────────────────────
 
 class BG360Panel(lf.ui.Panel):
-    id       = "bg360.panel"
-    label    = "360 Background"
-    space    = lf.ui.PanelSpace.MAIN_PANEL_TAB
-    order    = 300
+    id    = "bg360.panel"
+    label = "360 Background"
+    space = lf.ui.PanelSpace.MAIN_PANEL_TAB
+    order = 300
 
     def __init__(self):
-        self._status          = ""
-        self._pending_path    = None
-        self._threshold       = 0.02
-        self._preview_tensor  = None
-        self._preview_tex     = None
-        self._width           = 512
-        self._height          = 512
+        self._status         = ""
+        self._pending_path   = None
+        self._pending_result = None   # numpy array ready to upload to texture
+        self._threshold      = 0.02
+        self._preview_tex    = None
+        self._preview_w      = 512
+        self._preview_h      = 512
+        self._rendering      = False
 
     @classmethod
     def poll(cls, context) -> bool:
@@ -214,37 +173,43 @@ class BG360Panel(lf.ui.Panel):
 
         ui.heading("360° Background")
 
-        # Apply any pending path from browse thread
+        # ── Apply pending image load ──────────────────────────────────────────
         if self._pending_path is not None:
             err = _load_equirect(self._pending_path)
-            if err:
-                self._status = f"Error: {err}"
-            else:
-                self._status = f"Loaded: {Path(self._pending_path).name}"
-                self._preview_tensor = None  # invalidate preview
+            self._status       = f"Error: {err}" if err else f"Loaded: {Path(self._pending_path).name}"
             self._pending_path = None
 
-        # Status
+        # ── Upload pending render result to texture ───────────────────────────
+        if self._pending_result is not None:
+            import numpy as np
+            arr = self._pending_result
+            self._pending_result = None
+            t = lf.Tensor.from_numpy(arr).cuda()
+            if self._preview_tex is None:
+                self._preview_tex = lf.ui.DynamicTexture(t)
+            else:
+                self._preview_tex.update(t)
+            self._status    = "Preview rendered."
+            self._rendering = False
+            lf.ui.request_redraw()
+
+        # ── Status ───────────────────────────────────────────────────────────
         if self._status:
             ui.label(self._status)
 
-        # Enable toggle
+        # ── Enable toggle ─────────────────────────────────────────────────────
         changed, new_val = ui.checkbox("Enable 360 Background", _enabled)
         if changed:
-            _enabled = new_val
-            if _enabled and _bg_tensor is None:
+            if new_val and _bg_tensor is None:
                 self._status = "Load an image first."
-                _enabled = False
+            else:
+                _enabled = new_val
 
         ui.separator()
 
-        # File path display
-        if _bg_path:
-            ui.text_disabled(Path(_bg_path).name)
-        else:
-            ui.text_disabled("No image loaded")
+        # ── Image file ───────────────────────────────────────────────────────
+        ui.text_disabled(Path(_bg_path).name if _bg_path else "No image loaded")
 
-        # Browse button
         if ui.button("Browse Image"):
             initial = str(Path(_bg_path).parent) if _bg_path else os.path.expanduser("~")
             def _browse(initial=initial):
@@ -252,13 +217,14 @@ class BG360Panel(lf.ui.Panel):
                     path = lf.ui.open_image_dialog(initial)
                     if path:
                         self._pending_path = path
+                        lf.ui.request_redraw()
                 except Exception as e:
                     self._status = f"Browse error: {e}"
             threading.Thread(target=_browse, daemon=True).start()
 
         ui.separator()
 
-        # Threshold slider
+        # ── Threshold ─────────────────────────────────────────────────────────
         ui.label("Mask threshold")
         changed, new_t = ui.slider_float("##thresh", self._threshold, 0.001, 0.2)
         if changed:
@@ -266,94 +232,97 @@ class BG360Panel(lf.ui.Panel):
 
         ui.separator()
 
-        # Render & preview
+        # ── Preview & Save ────────────────────────────────────────────────────
         if _bg_tensor is not None and lf.has_scene():
-            if ui.button_styled("Render Preview", "primary"):
-                self._do_preview(ui)
+
+            if self._rendering:
+                ui.text_disabled("Rendering…")
+            else:
+                if ui.button_styled("Render Preview", "primary"):
+                    self._start_preview_thread()
 
             if self._preview_tex is not None:
                 avail = ui.get_content_region_avail()
                 w = int(avail[0])
-                h = int(w * self._height / max(1, self._width))
+                h = int(w * self._preview_h / max(1, self._preview_w))
                 ui.image_texture(self._preview_tex, (w, h))
 
-        ui.separator()
+            ui.separator()
 
-        # Save render button
-        if _bg_tensor is not None and lf.has_scene():
-            if ui.button("Save Composite Render"):
-                self._do_save()
+            if not self._rendering:
+                if ui.button("Save Composite Render"):
+                    self._start_save_thread()
 
-    def _do_preview(self, ui):
-        """Render a small composite and show in panel."""
-        global _bg_tensor
-        if _bg_tensor is None:
-            self._status = "Load an image first."
-            return
-        try:
-            view   = lf.get_current_view()
-            rot    = view.rotation.cpu().numpy()
-            import numpy as np
-            fwd    = (float(rot[0,2]), float(rot[1,2]), float(rot[2,2]))
-            pos    = view.position
-            target = (pos[0]+fwd[0], pos[1]+fwd[1], pos[2]+fwd[2])
+    def _get_camera(self):
+        """Return (pos, target, fov_x, width, height) from current view."""
+        import numpy as np
+        view = lf.get_current_view()
+        rot  = view.rotation.cpu().numpy()
+        fwd  = (float(rot[0,2]), float(rot[1,2]), float(rot[2,2]))
+        pos  = view.position
+        target = (pos[0]+fwd[0], pos[1]+fwd[1], pos[2]+fwd[2])
+        return pos, target, view.fov_x, view.width, view.height
 
-            W, H = 512, 512
-            result = composite_render(
-                W, H, view.fov_x, pos, target,
-                threshold=self._threshold
-            )
-            if result is None:
-                self._status = "Render failed."
-                return
+    def _start_preview_thread(self):
+        self._rendering = True
+        self._status    = "Rendering preview…"
+        pos, target, fov_x, _, _ = self._get_camera()
+        threshold = self._threshold
 
-            self._width  = W
-            self._height = H
+        def _run():
+            try:
+                result = composite_render(
+                    512, 512, fov_x, pos, target,
+                    threshold=threshold
+                )
+                if result is None:
+                    self._status   = "Render failed — check log."
+                    self._rendering = False
+                else:
+                    self._preview_w      = 512
+                    self._preview_h      = 512
+                    self._pending_result = result
+                lf.ui.request_redraw()
+            except Exception as e:
+                import traceback
+                self._status    = f"Error: {e}"
+                self._rendering = False
+                lf.log.error(f"360 BG preview: {traceback.format_exc()}")
+                lf.ui.request_redraw()
 
-            if self._preview_tex is None:
-                self._preview_tex = lf.ui.DynamicTexture(result)
-            else:
-                self._preview_tex.update(result)
+        threading.Thread(target=_run, daemon=True).start()
 
-            self._status = "Preview rendered."
-        except Exception as e:
-            self._status = f"Preview error: {e}"
-            lf.log.error(f"360 BG preview error: {e}")
+    def _start_save_thread(self):
+        self._rendering = True
+        self._status    = "Rendering full resolution…"
+        pos, target, fov_x, W, H = self._get_camera()
+        threshold = self._threshold
+        out_path  = str(Path(_bg_path).parent / "composite_render.png") if _bg_path else ""
 
-    def _do_save(self):
-        """Save full-resolution composite render to file."""
-        try:
-            import numpy as np
-            from PIL import Image
+        def _run():
+            try:
+                import numpy as np
+                from PIL import Image
 
-            path = lf.ui.save_ply_file_dialog("composite")  # reuse save dialog
-            # Actually use a generic path input — ask user
-            # For now save next to the bg image
-            if not _bg_path:
-                self._status = "No image loaded."
-                return
+                result = composite_render(W, H, fov_x, pos, target,
+                                          threshold=threshold)
+                if result is None:
+                    self._status    = "Render failed — check log."
+                    self._rendering = False
+                    lf.ui.request_redraw()
+                    return
 
-            view   = lf.get_current_view()
-            rot    = view.rotation.cpu().numpy()
-            fwd    = (float(rot[0,2]), float(rot[1,2]), float(rot[2,2]))
-            pos    = view.position
-            target = (pos[0]+fwd[0], pos[1]+fwd[1], pos[2]+fwd[2])
+                arr = (result * 255).clip(0, 255).astype(np.uint8)
+                Image.fromarray(arr).save(out_path)
+                self._status    = f"Saved: {out_path}"
+                self._rendering = False
+                lf.log.info(f"360 BG: saved to {out_path}")
+                lf.ui.request_redraw()
+            except Exception as e:
+                import traceback
+                self._status    = f"Save error: {e}"
+                self._rendering = False
+                lf.log.error(f"360 BG save: {traceback.format_exc()}")
+                lf.ui.request_redraw()
 
-            result = composite_render(
-                view.width, view.height, view.fov_x, pos, target,
-                threshold=self._threshold
-            )
-            if result is None:
-                self._status = "Render failed."
-                return
-
-            arr  = (result.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-            img  = Image.fromarray(arr)
-            out  = str(Path(_bg_path).parent / "composite_render.png")
-            img.save(out)
-            self._status = f"Saved: {out}"
-            lf.log.info(f"360 BG: saved composite to {out}")
-
-        except Exception as e:
-            self._status = f"Save error: {e}"
-            lf.log.error(f"360 BG save error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
