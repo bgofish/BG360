@@ -213,10 +213,19 @@ class BG360Panel(lf.ui.Panel):
         self._preview_h       = 512
         # Resolution
         self._res_idx         = 0    # index into _RESOLUTIONS
+        # Path type: "lfs" or "circular"
+        self._path_type       = "lfs"
         # LFS path
         self._lfs_path        = ""
         self._lfs_player      = None
         self._lfs_status      = ""
+        # Circular track
+        self._circ_path       = ""
+        self._circ_player     = None
+        self._circ_status     = ""
+        self._arc_per_snap    = 1.0
+        self._circ_loop       = True
+        self._pending_circ_path = None
         # Video
         self._fps             = 24
         self._fps_str         = "24"
@@ -264,6 +273,11 @@ class BG360Panel(lf.ui.Panel):
         if self._pending_lfs_path is not None:
             self._load_lfs_path(self._pending_lfs_path)
             self._pending_lfs_path = None
+
+        # Apply pending circular track load
+        if self._pending_circ_path is not None:
+            self._load_circ_path(self._pending_circ_path)
+            self._pending_circ_path = None
 
         if self._status:
             ui.label(self._status)
@@ -340,23 +354,59 @@ class BG360Panel(lf.ui.Panel):
     def _draw_video_section(self, ui):
         ui.separator()
 
-        # LFS path
-        ui.label("LFS Camera Path")
-        ui.text_disabled(Path(self._lfs_path).name if self._lfs_path else "No path loaded")
-        if ui.button("Browse Path##lfs"):
-            initial = str(Path(self._lfs_path).parent) if self._lfs_path else os.path.expanduser("~")
-            def _browse(initial=initial):
-                try:
-                    path = lf.ui.open_json_file_dialog()
-                    if path:
-                        self._pending_lfs_path = path
-                        _request_redraw()
-                except Exception as e:
-                    self._lfs_status = f"Browse error: {e}"
-            threading.Thread(target=_browse, daemon=True).start()
+        # Path type selector
+        ui.label("Camera path type")
+        changed, new_idx = ui.combo("##pathtype", 0 if self._path_type == "lfs" else 1,
+                                    ["LFS Camera Path", "Circular Track"])
+        if changed:
+            self._path_type = "lfs" if new_idx == 0 else "circular"
 
-        if self._lfs_status:
-            ui.label(self._lfs_status)
+        ui.separator()
+
+        if self._path_type == "lfs":
+            # LFS path
+            ui.label("LFS Camera Path")
+            ui.text_disabled(Path(self._lfs_path).name if self._lfs_path else "No path loaded")
+            if ui.button("Browse Path##lfs"):
+                def _browse():
+                    try:
+                        path = lf.ui.open_json_file_dialog()
+                        if path:
+                            self._pending_lfs_path = path
+                            _request_redraw()
+                    except Exception as e:
+                        self._lfs_status = f"Browse error: {e}"
+                threading.Thread(target=_browse, daemon=True).start()
+            if self._lfs_status:
+                ui.label(self._lfs_status)
+
+        else:
+            # Circular track
+            ui.label("Circular Track JSON")
+            ui.text_disabled(Path(self._circ_path).name if self._circ_path else "No track loaded")
+            if ui.button("Browse Track##circ"):
+                def _browse():
+                    try:
+                        path = lf.ui.open_json_file_dialog()
+                        if path:
+                            self._pending_circ_path = path
+                            _request_redraw()
+                    except Exception as e:
+                        self._circ_status = f"Browse error: {e}"
+                threading.Thread(target=_browse, daemon=True).start()
+            if self._circ_status:
+                ui.label(self._circ_status)
+
+            # Arc per snap
+            ui.label("Arc per frame (°)")
+            changed, new_arc = ui.drag_float("##arc", self._arc_per_snap, 0.1, 0.01, 360.0)
+            if changed:
+                self._arc_per_snap = max(0.01, float(new_arc))
+
+            # Loop
+            changed, new_loop = ui.checkbox("Loop track##circloop", self._circ_loop)
+            if changed:
+                self._circ_loop = new_loop
 
         ui.separator()
 
@@ -381,20 +431,29 @@ class BG360Panel(lf.ui.Panel):
         if self._video_status:
             ui.label(self._video_status)
 
-        # Render video button
-        if _bg_tensor is not None and self._lfs_player is not None and lf.has_scene():
-            W, H, _ = self._current_res()
-            total = self._lfs_player.n_keyframes  # rough frame count
-            dur   = self._lfs_player.total_duration
+        # Work out active player and frame count
+        active_player = None
+        total_frames  = 0
+        W, H, _       = self._current_res()
+
+        if self._path_type == "lfs" and self._lfs_player is not None:
+            active_player = self._lfs_player
+            dur = self._lfs_player.total_duration
             total_frames = int(dur * self._fps)
             ui.text_disabled(f"~{total_frames} frames @ {self._fps}fps  ({dur:.1f}s)")
+        elif self._path_type == "circular" and self._circ_player is not None:
+            active_player = self._circ_player
+            arc_range = abs(self._circ_player.arc_end - self._circ_player.arc_start)
+            total_frames = int(arc_range / max(0.001, self._arc_per_snap))
+            ui.text_disabled(f"~{total_frames} frames  ({arc_range:.0f}° arc)")
 
+        if _bg_tensor is not None and active_player is not None and lf.has_scene():
             if self._video_thread is not None and self._video_thread.is_alive():
                 if ui.button_styled("Stop Video##vstop", "error"):
                     self._video_stop = True
             else:
                 if ui.button_styled(f"Render Video {W}×{H}##vrender", "primary"):
-                    self._do_video(W, H)
+                    self._do_video(W, H, active_player, total_frames)
 
     # ── Still render ──────────────────────────────────────────────────────────
 
@@ -459,21 +518,41 @@ class BG360Panel(lf.ui.Panel):
             self._lfs_status = f"✗ Load error: {e}"
             lf.log.error(f"360 BG LFS load: {e}")
 
+    def _load_circ_path(self, path: str):
+        try:
+            import sys
+            plugin_dir = os.path.dirname(os.path.abspath(__file__))
+            sys.path.insert(0, plugin_dir)
+            try:
+                from track_player import TrackPlayer
+            except ImportError:
+                from _track_player_mini import TrackPlayer
+            self._circ_player = TrackPlayer(path)
+            self._circ_path   = path
+            self._circ_status = f"✓ Loaded — {self._circ_player.info}"
+            lf.log.info(f"360 BG: circular track loaded {path}")
+        except Exception as e:
+            self._circ_player = None
+            self._circ_status = f"✗ Load error: {e}"
+            lf.log.error(f"360 BG circular track load: {e}")
+
     # ── Video render ──────────────────────────────────────────────────────────
 
-    def _do_video(self, width: int, height: int):
-        import tempfile, time
+    def _do_video(self, width: int, height: int, player, total_frames: int):
+        import tempfile
         self._video_stop     = False
         self._video_status   = ""
         self._video_progress = "Starting…"
 
-        player    = self._lfs_player
-        fps       = self._fps
-        threshold = self._threshold
-        encoder   = self._encoder_idx
-        out_dir   = Path(_bg_path).parent if _bg_path else Path.home()
-        ext       = "mkv" if encoder == 0 else "mp4"
-        out_video = str(out_dir / f"bg360_video_{width}x{height}.{ext}")
+        fps        = self._fps
+        threshold  = self._threshold
+        encoder    = self._encoder_idx
+        path_type  = self._path_type
+        arc_per_snap = self._arc_per_snap
+        circ_loop  = self._circ_loop
+        out_dir    = Path(_bg_path).parent if _bg_path else Path.home()
+        ext        = "mkv" if encoder == 0 else "mp4"
+        out_video  = str(out_dir / f"bg360_video_{width}x{height}.{ext}")
         frames_dir = Path(tempfile.mkdtemp(prefix="bg360_frames_"))
 
         def _run():
@@ -481,29 +560,32 @@ class BG360Panel(lf.ui.Panel):
                 import numpy as np
                 from PIL import Image
 
-                dur          = player.total_duration
-                total_frames = int(dur * fps)
-                secs_per_frame = 1.0 / fps
-
                 for i in range(total_frames):
                     if self._video_stop:
                         self._video_progress = "Stopped."
                         _request_redraw()
                         return
 
-                    t   = i * secs_per_frame
-                    pos, target_pt, up_vec, fov = player.get_camera_at_snap(
-                        i, secs_per_frame, loop=False
-                    )
+                    if path_type == "lfs":
+                        secs_per_frame = 1.0 / fps
+                        pos, target_pt, up_vec, fov = player.get_camera_at_snap(
+                            i, secs_per_frame, loop=False
+                        )
+                    else:  # circular
+                        pos, target_pt, up_vec, fov = player.get_camera_at_snap(
+                            i, arc_per_snap, loop=circ_loop
+                        )
 
+                    # fov from LFSPathPlayer is in degrees already
+                    # fov from TrackPlayer is also degrees
                     result = composite_render(
-                        width, height, math.degrees(fov) if fov < 10 else fov,
+                        width, height, float(fov),
                         pos, target_pt, up=up_vec,
                         threshold=threshold
                     )
 
                     if result is None:
-                        self._video_progress = f"Frame {i} failed."
+                        self._video_progress = f"Frame {i} failed — skipping."
                         continue
 
                     arr = (result.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
@@ -530,7 +612,6 @@ class BG360Panel(lf.ui.Panel):
 
                 self._video_progress = ""
 
-                # Clean up frames
                 try:
                     import shutil
                     shutil.rmtree(frames_dir)
