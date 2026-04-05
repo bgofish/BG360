@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "segments": [
+    {
+      "type": "orbit",
+      "poi": [
+        0,
+        -5,
+        0
+      ],
+      "radius": 10,
+      "elevation": 0,
+      "orbit_axis": "y",
+      "start_angle": 0.0,
+      "arc_degrees": 360.0,
+      "duration": 30.0,
+      "invert_direction": false
+    }
+  ],
+  "settings": {
+    "speed": 1.0,
+    "smooth_factor": 0.5,
+    "elevation": -5.0,
+    "up_axis_idx": 1,
+    "invert_elevation": false,
+    "resolution_idx": 0,
+    "fps": 30.0,
+    "fov": 90.0,
+    "preview_speed": 1.0
+  }
+}
