@@ -53,6 +53,7 @@ def _load_equirect(path: str) -> str:
         from PIL import Image
         import numpy as np
         img = Image.open(path).convert("RGB")
+        img = img.rotate(180)
         arr = np.array(img, dtype=np.float32) / 255.0
         _bg_tensor = lf.Tensor.from_numpy(arr).cuda()
         _bg_path   = path
@@ -207,7 +208,7 @@ class BG360Panel(lf.ui.Panel):
         self._status          = ""
         self._pending_path    = None
         self._pending_lfs_path = None
-        self._threshold       = 0.02
+        self._threshold       = 2
         self._preview_tex     = None
         self._preview_w       = 512
         self._preview_h       = 512
