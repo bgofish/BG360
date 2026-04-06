@@ -48,16 +48,133 @@ def _request_redraw():
 
 
 def _load_equirect(path: str) -> str:
+    """Load an equirectangular image into _bg_tensor as a [H, W, 3] float32 array.
+
+    Format handling:
+      .exr  → OpenEXR via the ``OpenEXR`` + ``Imath`` packages, falling back to
+               imageio[freeimage] if the primary stack is unavailable.
+      .hdr  → Radiance HDR via imageio (ships with Pillow and keeps full HDR
+               linear values; *not* tone-mapped to 8-bit).
+      other → PIL for standard LDR formats (JPEG, PNG, TIFF, …).
+
+    The tensor is stored in linear scene-referred values:
+      • EXR / HDR  → already linear, stored as-is (values > 1 are fine; the
+                     compositor clips only at output time).
+      • LDR (PIL)  → divided by 255 and assumed to be sRGB-encoded, but *no*
+                     gamma expansion is applied so the existing behaviour for
+                     PNG/JPEG backgrounds is unchanged.
+    """
     global _bg_tensor, _bg_path
+    ext = Path(path).suffix.lower()
     try:
-        from PIL import Image
         import numpy as np
-        img = Image.open(path).convert("RGB")
-        arr = np.array(img, dtype=np.float32) / 255.0
+
+        # ── EXR ───────────────────────────────────────────────────────────────
+        if ext == ".exr":
+            arr = None
+
+            # Attempt 1: OpenEXR + Imath (most reliable, preserves all channels)
+            try:
+                import OpenEXR, Imath
+                exr   = OpenEXR.InputFile(path)
+                hdr   = exr.header()
+                dw    = hdr["dataWindow"]
+                W_exr = dw.max.x - dw.min.x + 1
+                H_exr = dw.max.y - dw.min.y + 1
+                pt    = Imath.PixelType(Imath.PixelType.FLOAT)
+                R = np.frombuffer(exr.channel("R", pt), dtype=np.float32).reshape(H_exr, W_exr)
+                G = np.frombuffer(exr.channel("G", pt), dtype=np.float32).reshape(H_exr, W_exr)
+                B = np.frombuffer(exr.channel("B", pt), dtype=np.float32).reshape(H_exr, W_exr)
+                arr = np.stack([R, G, B], axis=-1)
+                lf.log.info("360 BG: EXR loaded via OpenEXR")
+            except ImportError:
+                pass  # fall through to next attempt
+
+            # Attempt 2: imageio (works if freeimage or openexr plugin is present)
+            if arr is None:
+                try:
+                    import imageio
+                    arr = imageio.imread(path, format="exr").astype(np.float32)
+                    if arr.ndim == 2:               # single-channel EXR → replicate
+                        arr = np.stack([arr]*3, axis=-1)
+                    elif arr.shape[2] == 4:         # RGBA → drop alpha
+                        arr = arr[:, :, :3]
+                    lf.log.info("360 BG: EXR loaded via imageio")
+                except Exception as e_iio:
+                    pass
+
+            # Attempt 3: imageio v3 API (imageio ≥ 2.22)
+            if arr is None:
+                try:
+                    import imageio.v3 as iio3
+                    arr = iio3.imread(path).astype(np.float32)
+                    if arr.ndim == 2:
+                        arr = np.stack([arr]*3, axis=-1)
+                    elif arr.shape[2] == 4:
+                        arr = arr[:, :, :3]
+                    lf.log.info("360 BG: EXR loaded via imageio v3")
+                except Exception:
+                    pass
+
+            if arr is None:
+                return (
+                    "Cannot load EXR: install the 'OpenEXR' package  "
+                    "(pip install openexr)  or imageio with EXR support  "
+                    "(pip install imageio[freeimage])."
+                )
+
+        # ── Radiance HDR (.hdr / .pic) ────────────────────────────────────────
+        elif ext in (".hdr", ".pic"):
+            arr = None
+
+            # imageio keeps linear HDR values (PIL would lose the dynamic range)
+            try:
+                import imageio
+                arr = imageio.imread(path, format="hdr").astype(np.float32)
+                if arr.ndim == 2:
+                    arr = np.stack([arr]*3, axis=-1)
+                elif arr.shape[2] == 4:
+                    arr = arr[:, :, :3]
+                lf.log.info("360 BG: HDR loaded via imageio")
+            except Exception:
+                pass
+
+            if arr is None:
+                try:
+                    import imageio.v3 as iio3
+                    arr = iio3.imread(path).astype(np.float32)
+                    if arr.ndim == 2:
+                        arr = np.stack([arr]*3, axis=-1)
+                    elif arr.shape[2] == 4:
+                        arr = arr[:, :, :3]
+                    lf.log.info("360 BG: HDR loaded via imageio v3")
+                except Exception:
+                    pass
+
+            if arr is None:
+                # Last resort: PIL (tone-maps to 8-bit — dynamic range is lost)
+                from PIL import Image
+                img = Image.open(path).convert("RGB")
+                arr = np.array(img, dtype=np.float32) / 255.0
+                lf.log.warning(
+                    "360 BG: HDR loaded via PIL fallback — "
+                    "dynamic range may be clipped. Install imageio for full HDR support."
+                )
+
+        # ── Standard LDR (PNG, JPEG, TIFF, …) ────────────────────────────────
+        else:
+            from PIL import Image
+            img = Image.open(path).convert("RGB")
+            arr = np.array(img, dtype=np.float32) / 255.0
+
         _bg_tensor = lf.Tensor.from_numpy(arr).cuda()
         _bg_path   = path
-        lf.log.info(f"360 BG: loaded {path} — {arr.shape[1]}x{arr.shape[0]}")
+        lf.log.info(
+            f"360 BG: loaded {path} — {arr.shape[1]}×{arr.shape[0]}  "
+            f"range [{arr.min():.3f}, {arr.max():.3f}]"
+        )
         return ""
+
     except Exception as e:
         lf.log.error(f"360 BG: load error – {e}")
         return str(e)
